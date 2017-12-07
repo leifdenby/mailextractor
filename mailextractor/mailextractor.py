@@ -8,7 +8,6 @@ from __future__ import print_function
 
 import email
 import email.parser
-import getpass
 import imaplib
 import os
 import yaml
@@ -131,7 +130,7 @@ def select_folder(imap_session, folder_name):
 
         raise Exception("Couldn't open IMAP folder `{}`".format(folder_name))
 
-def _create_session(hostname, username, password):
+def create_imap_session(hostname, username, password):
     print("Connecting to `{}` as {}...".format(hostname, username), end="")
     imap_session = imaplib.IMAP4_SSL(hostname)
     typ, accountDetails = imap_session.login(username, password)
@@ -189,38 +188,3 @@ def download_attachments(imap_session, search_subject, search_body,
     imap_session.logout()
 
     print("Downloaded {} emails to {}".format(len(msg_ids), ROOT_PATH))
-
-
-if __name__ == "__main__":
-    import argparse
-    argparser = argparse.ArgumentParser(__doc__)
-    argparser.add_argument('hostname')
-    argparser.add_argument('username')
-    argparser.add_argument('-l', help="list IMAP folders", action="store_true")
-    argparser.add_argument('-s', help="subject search pattern", default="")
-    argparser.add_argument('-b', help="body search pattern", default="*")
-    argparser.add_argument('-p', help="password", default=None)
-    argparser.add_argument('-f', help="IMAP folder", default="INBOX")
-    argparser.add_argument('--debug', help="Show debug info", default=False)
-
-    args = argparser.parse_args()
-
-    if args.p is not None:
-        passord = args.p
-    else:
-        password = getpass.getpass()
-
-    search_subject = args.s
-    search_body = args.b
-
-    imap_session = _create_session(username=args.username,
-                                   hostname=args.hostname,
-                                   password=password)
-
-    if args.l:
-        list_available_folders(imap_session)
-    else:
-        download_attachments(imap_session=imap_session,
-                             search_subject=search_subject,
-                             search_body=search_body, imap_folder=args.f,
-                             debug=args.debug)
