@@ -1,13 +1,18 @@
-# Something in lines of http://stackoverflow.com/questions/348630/how-can-i-download-all-emails-with-attachments-from-gmail
-# Make sure you have IMAP enabled in your gmail settings.
-# Right now it won't download same file name twice even if their contents are different.
+"""
+Email download utility which connects to IMAP server and writes email content
+to files, including attachments and Amazon SES delivery information
+
+Copyright 2017 Leif Denby, GPL-3 License
+"""
+from __future__ import print_function
 
 import email
 import email.parser
-import getpass, imaplib
+import getpass
+import imaplib
 import os
-import sys
 import yaml
+import tqdm
 
 ROOT_PATH = "emails"
 
@@ -27,11 +32,13 @@ def _save_attachment(part, path):
 
     return file_path
 
-def _handle_part(part, msg_dir, indent="  "):
+def _handle_part(part, msg_dir, indent="  ", debug=False):
     maintype = part.get_content_maintype()
     contenttype = part.get_content_type()
     filename = part.get_filename()
-    print("{}--> {} {} ({})".format(indent, maintype, contenttype, filename))
+    if debug:
+        print("{}--> {} {} ({})".format(indent, maintype,
+                                        contenttype, filename))
 
     if contenttype == "text/plain":
         n = 0
@@ -49,42 +56,106 @@ def _handle_part(part, msg_dir, indent="  "):
             fh.write(part.get_payload())
     elif maintype in ["application", "image"]:
         _save_attachment(part, msg_dir)
-    elif contenttype in ["multipart/alternative", "multipart/related"]:
+    elif contenttype in ["multipart/alternative", "multipart/related",
+                         "multipart/mixed"]:
         for mp in part.get_payload():
             _handle_part(mp, msg_dir=msg_dir, indent=indent+"  ")
     elif contenttype == "message/delivery-status":
         delivery_status_path = os.path.join(msg_dir, "delivery-status")
         if not os.path.exists(delivery_status_path):
             os.mkdir(delivery_status_path)
+
+        n = 0
         for mp in part.get_payload():
-            _handle_part(mp, msg_dir=msg_dir, indent=indent+"  ")
+            found_filename = False
+            while not found_filename:
+                filename = os.path.join(delivery_status_path,
+                                        "delivery-status-{}.yaml".format(n))
+                if not os.path.exists(filename):
+                    found_filename = True
+                else:
+                    n += 1
+
+            mp_header = header_parser.parsestr(str(mp))
+            with open(filename, "w") as fh:
+                yaml.dump(dict(mp_header.items()), fh,
+                          default_flow_style=False)
+
     elif contenttype == "message/rfc822":
         for mp in part.get_payload():
-            import ipdb
-            ipdb.set_trace()
             _handle_part(mp, msg_dir=msg_dir)
     else:
         raise NotImplementedError("{} {}".format(maintype, contenttype))
 
-def download_attachments(hostname, username, password, search_str):
+def _do_search(imap_session, field, value, debug=False):
+    if debug:
+        print("Seaching `{}` for `{}`...".format(field, value), end=" ")
+    typ, data = imap_session.search(None, '({} "{}")'.format(field, value))
+    if typ != 'OK':
+        raise Exception("Error searching inbox: {}".format(str(type)))
+
+    email_ids = [int(s) for s in data[0].split()]
+    if debug:
+        print(len(email_ids))
+    return email_ids
+
+def _parse_folder_string(data):
+    '''
+    parse_mailbox() will extract the three pieces of information from
+    the items returned from a call to IMAP4.list(). The initial data
+    array looks like:
+    [b'(\\HasChildren) "/" NameOfFolder', ...]
+    At least on my server. If the folder name has spaces then it will
+    be quote delimited.
+
+    from
+    http://tech.franzone.blog/2012/11/24/listing-imap-mailboxes-with-python/
+    '''
+    flags, b, c = data.partition(' ')
+    separator, b, name = c.partition(' ')
+    return (flags, separator.replace('"', ''), name.replace('"', ''))
+
+def list_available_folders(imap_session):
+    resp_status, resp_data = imap_session.list()
+
+    for entry in resp_data:
+        flags, _, name = _parse_folder_string(entry)
+        print(flags, u"  {}".format(name))
+
+def select_folder(imap_session, folder_name):
+    resp_status, resp_mesg = imap_session.select(folder_name)
+
+    if resp_status != "OK":
+        print("Available folders:")
+        list_available_folders(imap_session)
+
+        raise Exception("Couldn't open IMAP folder `{}`".format(folder_name))
+
+def _create_session(hostname, username, password):
+    print("Connecting to `{}` as {}...".format(hostname, username), end="")
     imap_session = imaplib.IMAP4_SSL(hostname)
     typ, accountDetails = imap_session.login(username, password)
     if typ != 'OK':
         raise Exception("Couldn't sign in: {}".format(str(typ)))
+    print("connected")
+    return imap_session
+
+def download_attachments(imap_session, search_subject, search_body,
+                         imap_folder="INBOX", debug=False):
+    select_folder(imap_session, imap_folder)
 
     if not os.path.exists(ROOT_PATH):
         os.mkdir(ROOT_PATH)
 
-    imap_session.select('inbox')
-    typ, data = imap_session.search(None, '(SUBJECT "{}")'.format(search_str))
-    if typ != 'OK':
-        raise Exception("Error searching inbox: {}".format(str(type)))
-
-    msg_ids = data[0].split()
-    print "{} emails found".format(len(msg_ids))
+    msg_ids_0 = _do_search(imap_session, "SUBJECT", search_subject)
+    msg_ids_1 = _do_search(imap_session, "BODY", search_body)
+    msg_ids = set(msg_ids_0).intersection(msg_ids_1)
+    print("{} emails found".format(len(msg_ids)))
+    print()
 
     # Iterating over all emails
-    for msg_id in msg_ids:
+    print("Downloading...")
+    for msg_id in tqdm.tqdm(msg_ids):
         typ, message_parts = imap_session.fetch(msg_id, '(RFC822)')
         if typ != 'OK':
             raise Exception("Error fetching email: {}".format(str(typ)))
@@ -94,7 +165,8 @@ def download_attachments(hostname, username, password, search_str):
         msg_header = header_parser.parsestr(email_body)
         msg_uid = msg_header['message-id'][1:-1]
 
-        print("uid: {}".format(msg_uid))
+        if debug:
+            print("uid: {}".format(msg_uid))
 
         msg_dir = os.path.join(ROOT_PATH, msg_uid)
         if not os.path.exists(msg_dir):
@@ -109,12 +181,14 @@ def download_attachments(hostname, username, password, search_str):
             part_maintype = part.get_content_maintype()
             if part_maintype == 'multipart':
                 for mp in part.get_payload():
-                    _handle_part(mp, msg_dir=msg_dir)
+                    _handle_part(mp, msg_dir=msg_dir, debug=debug)
             else:
-                _handle_part(part, msg_dir=msg_dir)
+                _handle_part(part, msg_dir=msg_dir, debug=debug)
 
     imap_session.close()
     imap_session.logout()
+
+    print("Downloaded {} emails to {}".format(len(msg_ids), ROOT_PATH))
 
 
 if __name__ == "__main__":
@@ -122,13 +196,31 @@ if __name__ == "__main__":
     argparser = argparse.ArgumentParser(__doc__)
     argparser.add_argument('hostname')
     argparser.add_argument('username')
-    argparser.add_argument('-s', help="search pattern", default="*")
+    argparser.add_argument('-l', help="list IMAP folders", action="store_true")
+    argparser.add_argument('-s', help="subject search pattern", default="")
+    argparser.add_argument('-b', help="body search pattern", default="*")
     argparser.add_argument('-p', help="password", default=None)
+    argparser.add_argument('-f', help="IMAP folder", default="INBOX")
+    argparser.add_argument('--debug', help="Show debug info", default=False)
 
     args = argparser.parse_args()
 
-    password = getpass.getpass()
-    search_str = args.s
+    if args.p is not None:
+        passord = args.p
+    else:
+        password = getpass.getpass()
 
-    download_attachments(username=args.username, hostname=args.hostname,
-                         password=password, search_str=search_str)
+    search_subject = args.s
+    search_body = args.b
+
+    imap_session = _create_session(username=args.username,
+                                   hostname=args.hostname,
+                                   password=password)
+
+    if args.l:
+        list_available_folders(imap_session)
+    else:
+        download_attachments(imap_session=imap_session,
+                             search_subject=search_subject,
+                             search_body=search_body, imap_folder=args.f,
+                             debug=args.debug)
