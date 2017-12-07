@@ -3,6 +3,10 @@
 This simple utility allows you to download email content (including
 attachments) from an IMAP server.
 
+Emails are downloaded to `emails/{email-uid}/` with header information added to
+`emails/{email-uid}/headers.yaml` and attachments to
+`emails/{email-uid}/attachments`.
+
 install:
 
 ```
